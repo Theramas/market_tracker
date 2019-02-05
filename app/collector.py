@@ -1,6 +1,7 @@
 import requests
 import logging
 import sqlite3
+import csv
 from bs4 import BeautifulSoup
 
 LOG = logging.getLogger()
@@ -66,3 +67,25 @@ def database_store(data: dict, table_name: str):
         cursor.execute(command, list(entry.values()))
     connection.commit()
     connection.close()
+
+
+def save_to_xml():
+    connection = sqlite3.connect('market.db')
+    cursor = connection.cursor()
+    cursor.execute("SELECT name, price, change from gainers")
+    gainers = cursor.fetchall()
+    cursor.execute("SELECT name, price, change from losers")
+    losers = cursor.fetchall()
+    connection.commit()
+    connection.close()
+    with open('gainers.csv', 'a') as csv_file:
+        writer = csv.writer(csv_file)
+        writer.writerow(['Company Name', 'Price', 'Change'])
+        for name, price, change in gainers:
+            writer.writerow([name, price, change])
+    with open('losers.csv', 'a') as csv_file:
+        writer = csv.writer(csv_file)
+        writer.writerow(['Company Name', 'Price', 'Change'])
+        for name, price, change in losers:
+            writer.writerow([name, price, change])
+
