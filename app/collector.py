@@ -63,6 +63,6 @@ def database_store(data: dict, table_name: str):
             keys=', '.join(entry.keys()),
             values=(len(entry)-1) * "?, " + "?"
         )
-        cursor.execute(command, sorted(entry.values()))
+        cursor.execute(command, list(entry.values()))
     connection.commit()
     connection.close()
