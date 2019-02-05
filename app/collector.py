@@ -1,8 +1,19 @@
 import requests
 import logging
+import sqlite3
 from bs4 import BeautifulSoup
 
 LOG = logging.getLogger()
+
+LABEL_ALIASES = {
+    'Name': ('name', 'text'),
+    'Price (Intraday)': ('price', 'real'),
+    'Change': ('change', 'real'),
+    '% Change': ('percent_change', 'text'),
+    'Volume': ('volume', 'text'),
+    'Avg Vol (3 month)': ('three_month_average_vol', 'real'),
+    'Market Cap': ('cap', 'text'),
+    'PE Ratio (TTM)': ('pe_ratio', 'real')}
 
 
 def get_data(url):
@@ -16,32 +27,42 @@ def get_data(url):
     table_of_contents = list(soup.find('tbody').children)
     LOG.debug('Found data in Soup:\n%s' % table_of_contents)
     table_entries = []
-    labels = ['Symbol', 'Name', 'Price (Intraday)', 'Change', '% Change', 'Volume', 'Avg Vol (3 month)', 'Market Cap', 'PE Ratio (TTM)']
     for entry in table_of_contents:
         data = {}
-        for label in labels:
-            data[label] = entry.find('td', attrs={'aria-label': label}).get_text()
-        LOG.debug('Collected data for %s:\n%s' % (data['Name'], data))
+        for label in LABEL_ALIASES.keys():
+            data[LABEL_ALIASES[label][0]] = entry.find('td', attrs={'aria-label': label}).get_text()
+        LOG.debug('Collected data for %s:\n%s' % (data['name'], data))
         table_entries.append(data)
     return table_entries
 
 
 def get_gainers(url=None):
     url = url or "https://ca.finance.yahoo.com/screener/predefined/day_gainers?guccounter=1"
-    return get_data(url)
+    data = get_data(url)
+    database_store(data=data, table_name='gainers')
 
 
 def get_losers(url=None):
     url = url or "https://ca.finance.yahoo.com/screener/predefined/day_losers"
-    return get_data(url)
+    data = get_data(url)
+    database_store(data=data, table_name='losers')
 
 
-def database_store(data: dict, table: str):
-    cursor = sqlite3.connect('market.db').cursor()
-    LOG.debug('Check that table %s exists.' % table)
-    cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='%s'" % table)
+def database_store(data: dict, table_name: str):
+    connection = sqlite3.connect('market.db')
+    cursor = connection.cursor()
+    LOG.debug('Check that table %s exists.' % table_name)
+    cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='%s'" % table_name)
     if not cursor.fetchone():
-        cursor.execute('''CREATE TABLE %s
-                          (symbol text, name text, price real, change real, %change text, volume text, 3m_average_vol real, cap text, pe_ratio real)''')
-        LOG.debug('Created table %s.' % table)
-    # Continue with data insert
+        table_values = ', '.join([' '.join(v) for v in sorted(LABEL_ALIASES.values())])
+        cursor.execute("CREATE TABLE %s (%s)" % (table_name, table_values))
+        LOG.debug('Created table %s.' % table_name)
+    for entry in data:
+        command = "INSERT INTO {table_name} ({keys}) VALUES ({values})".format(
+            table_name=table_name,
+            keys=', '.join(entry.keys()),
+            values=(len(entry)-1) * "?, " + "?"
+        )
+        cursor.execute(command, sorted(entry.values()))
+    connection.commit()
+    connection.close()
