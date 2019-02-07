@@ -2,6 +2,14 @@ import requests
 import logging
 import sqlite3
 import csv
+import smtplib
+
+from os.path import basename
+from email.mime.application import MIMEApplication
+from email.mime.multipart import MIMEMultipart
+from email.mime.text import MIMEText
+from email.utils import COMMASPACE, formatdate
+
 from bs4 import BeautifulSoup
 
 LOG = logging.getLogger()
@@ -17,7 +25,7 @@ LABEL_ALIASES = {
     'PE Ratio (TTM)': ('pe_ratio', 'real')}
 
 
-def get_data(url):
+def get_data_from_website(url):
     """Extract data from Soup object and convert into dict"""
     response = requests.get(url)
     if response.status_code != 200:
@@ -35,18 +43,6 @@ def get_data(url):
         LOG.debug('Collected data for %s:\n%s' % (data['name'], data))
         table_entries.append(data)
     return table_entries
-
-
-def get_gainers(url=None):
-    url = url or "https://ca.finance.yahoo.com/screener/predefined/day_gainers?guccounter=1"
-    data = get_data(url)
-    database_store(data=data, table_name='gainers')
-
-
-def get_losers(url=None):
-    url = url or "https://ca.finance.yahoo.com/screener/predefined/day_losers"
-    data = get_data(url)
-    database_store(data=data, table_name='losers')
 
 
 def database_store(data: dict, table_name: str):
@@ -69,23 +65,80 @@ def database_store(data: dict, table_name: str):
     connection.close()
 
 
-def save_to_xml():
+def collect_data():
+    sources = [
+        ("gainers", "https://ca.finance.yahoo.com/screener/predefined/day_gainers?guccounter=1")
+        ("losers", "https://ca.finance.yahoo.com/screener/predefined/day_losers")
+    ]
+    for source in sources:
+        data = get_data_from_website(source[1])
+        database_store(data=data, table_name=source[0])
+
+
+def extract_from_database(table: str, metric: str, amount: int):
     connection = sqlite3.connect('market.db')
     cursor = connection.cursor()
-    cursor.execute("SELECT name, price, change from gainers")
-    gainers = cursor.fetchall()
-    cursor.execute("SELECT name, price, change from losers")
-    losers = cursor.fetchall()
+    if table == 'gainers':
+        command = "SELECT name, {metric} FROM {table} ORDER BY {metric} DESC LIMIT {amount}".format(
+            metric=metric,
+            table=table,
+            amount=amount)
+    elif table == 'losers':
+        command = "SELECT name, {metric} FROM {table} ORDER BY {metric} LIMIT {amount}".format(
+            metric=metric,
+            table=table,
+            amount=amount)
+    cursor.execute(command)
+    data = cursor.fetchall()
     connection.commit()
     connection.close()
-    with open('gainers.csv', 'a') as csv_file:
-        writer = csv.writer(csv_file)
-        writer.writerow(['Company Name', 'Price', 'Change'])
-        for name, price, change in gainers:
-            writer.writerow([name, price, change])
-    with open('losers.csv', 'a') as csv_file:
-        writer = csv.writer(csv_file)
-        writer.writerow(['Company Name', 'Price', 'Change'])
-        for name, price, change in losers:
-            writer.writerow([name, price, change])
+    return data
 
+
+def write_to_xml(data: list, file_name: str):
+    with open('%s.csv' % file_name, 'a') as csv_file:
+        writer = csv.writer(csv_file)
+        writer.writerow(['Gainers', ' ', 'Losers', ' '])
+        writer.writerow(['Company Name', 'Change',
+                         'Company Name', 'Change'])
+        for gainer_name, gainer_change, loser_name, loser_change in data:
+            writer.writerow([gainer_name, gainer_change,
+                             loser_name, loser_change])
+
+
+def send_mail(send_from: str, send_to: list, subject: str, text: str, files=[],
+              server="127.0.0.1"):
+
+    msg = MIMEMultipart()
+    msg['From'] = send_from
+    msg['To'] = COMMASPACE.join(send_to)
+    msg['Date'] = formatdate(localtime=True)
+    msg['Subject'] = subject
+
+    msg.attach(MIMEText(text))
+
+    for f in files:
+        with open(f, "rb") as fil:
+            part = MIMEApplication(
+                fil.read(),
+                Name=basename(f)
+            )
+        # After the file is closed
+        part['Content-Disposition'] = 'attachment; filename="%s"' % basename(f)
+        msg.attach(part)
+
+    smtp = smtplib.SMTP(server)
+    smtp.sendmail(send_from, send_to, msg.as_string())
+    smtp.close()
+
+
+def make_report():
+    gainers = extract_from_database(table='gainers', metric='change', amount=5)
+    losers = extract_from_database(table='losers', metric='change', amount=5)
+    data = list(map(lambda x, y: (x[0], x[1], y[0], y[1]), gainers, losers))
+    write_to_xml(data, 'report')
+    mail_text = "Top 5 gainers of the day:\nCompany Change\n{gainers}\n\nTop 5 losers of the day:\nCompany Change\n{losers}".format(
+        gainers=[gainer[0] + ' ' + str(gainer[1]) for gainer in gainers],
+        losers=[loser[0] + ' ' + str(loser[1]) for loser in losers])
+    send_mail("test@gmail.com", "nkalmykov13@gmail.com", "Best Gainers/Losers report", mail_text, files=["report.csv"])
+    os.remove('report.csv')
