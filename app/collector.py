@@ -132,7 +132,7 @@ def send_mail(send_from: str, send_to: list, subject: str, text: str, files=[],
     smtp.close()
 
 
-def make_report():
+def make_report(receiver_email, smtp_server="127.0.0.1"):
     gainers = extract_from_database(table='gainers', metric='change', amount=5)
     losers = extract_from_database(table='losers', metric='change', amount=5)
     data = list(map(lambda x, y: (x[0], x[1], y[0], y[1]), gainers, losers))
@@ -140,5 +140,11 @@ def make_report():
     mail_text = "Top 5 gainers of the day:\nCompany Change\n{gainers}\n\nTop 5 losers of the day:\nCompany Change\n{losers}".format(
         gainers=[gainer[0] + ' ' + str(gainer[1]) for gainer in gainers],
         losers=[loser[0] + ' ' + str(loser[1]) for loser in losers])
-    send_mail("test@gmail.com", "nkalmykov13@gmail.com", "Best Gainers/Losers report", mail_text, files=["report.csv"])
+    send_mail(
+        "test@gmail.com",
+        receiver_email,
+        "Best Gainers/Losers report",
+        mail_text,
+        files=["report.csv"],
+        server=server)
     os.remove('report.csv')
