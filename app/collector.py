@@ -3,6 +3,7 @@ import logging
 import sqlite3
 import csv
 import smtplib
+import os
 
 from os.path import basename
 from email.mime.application import MIMEApplication
@@ -12,7 +13,12 @@ from email.utils import COMMASPACE, formatdate
 
 from bs4 import BeautifulSoup
 
-LOG = logging.getLogger()
+LOG = logging.getLogger('collector')
+LOG_HANDLER = logging.FileHandler('%s/logs/collector.log' % os.getcwd())
+LOG_FORMATTER = logging.Formatter('%(asctime)s %(levelname)s %(message)s')
+LOG_HANDLER.setFormatter(LOG_FORMATTER)
+LOG.addHandler(LOG_HANDLER)
+LOG.setLevel(logging.DEBUG)
 
 LABEL_ALIASES = {
     'Name': ('name', 'text'),
@@ -28,13 +34,13 @@ LABEL_ALIASES = {
 def get_data_from_website(url):
     """Extract data from Soup object and convert into dict"""
     response = requests.get(url)
+    LOG.debug(f"Got response from {url}:\n{response}")
     if response.status_code != 200:
-        raise Exception("Got unexpected response from %s:\n%s" %
-                        (url, response.reason))
-    soup = BeautifulSoup(response.content)
+        raise Exception(f"Got unexpected response from {url}:\n{response.reason}")
+    soup = BeautifulSoup(response.content, features="lxml")
 
     table_of_contents = list(soup.find('tbody').children)
-    LOG.debug('Found data in Soup:\n%s' % table_of_contents)
+    LOG.debug(f'Found data in Soup:\n{table_of_contents}.')
     table_entries = []
     for entry in table_of_contents:
         data = {}
@@ -45,14 +51,15 @@ def get_data_from_website(url):
     return table_entries
 
 
-def database_store(data: dict, table_name: str):
+def store_in_database(data: dict, table_name: str):
+    """Store collected web data in local database"""
     connection = sqlite3.connect('market.db')
     cursor = connection.cursor()
-    LOG.debug('Check that table %s exists.' % table_name)
-    cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='%s'" % table_name)
+    LOG.debug(f'Check that table {table_name} exists.')
+    cursor.execute(f"SELECT name FROM sqlite_master WHERE type='table' AND name='{table_name}'")
     if not cursor.fetchone():
         table_values = ', '.join([' '.join(v) for v in sorted(LABEL_ALIASES.values())])
-        cursor.execute("CREATE TABLE %s (%s)" % (table_name, table_values))
+        cursor.execute(f"CREATE TABLE {table_name} ({table_values})")
         LOG.debug('Created table %s.' % table_name)
     for entry in data:
         command = "INSERT INTO {table_name} ({keys}) VALUES ({values})".format(
@@ -61,29 +68,35 @@ def database_store(data: dict, table_name: str):
             values=(len(entry)-1) * "?, " + "?"
         )
         cursor.execute(command, list(entry.values()))
+    LOG.debug(f'Successfully inserted data into {table_name}:\n{data}')
     connection.commit()
     connection.close()
 
 
-def collect_data():
-    sources = [
-        ("gainers", "https://ca.finance.yahoo.com/screener/predefined/day_gainers?guccounter=1")
+def collect_data(sources: list = None):
+    """Get data from specified URls and store it in local database"""
+    sources = sources or [
+        ("gainers", "https://ca.finance.yahoo.com/screener/predefined/day_gainers?guccounter=1"),
         ("losers", "https://ca.finance.yahoo.com/screener/predefined/day_losers")
     ]
     for source in sources:
+        LOG.debug('Collecting data from %s' % source[1])
         data = get_data_from_website(source[1])
-        database_store(data=data, table_name=source[0])
+        store_in_database(data=data, table_name=source[0])
 
 
-def extract_from_database(table: str, metric: str, amount: int):
+def get_top_choices_from_database(table: str, metric: str, amount: int):
+    """Extract N amount of top choices from local databse based on specified metric"""
     connection = sqlite3.connect('market.db')
     cursor = connection.cursor()
     if table == 'gainers':
+        LOG.debug(f"Attempting to get top {amount} gainers based on {metric}.")
         command = "SELECT name, {metric} FROM {table} ORDER BY {metric} DESC LIMIT {amount}".format(
             metric=metric,
             table=table,
             amount=amount)
     elif table == 'losers':
+        LOG.debug(f"Attempting to get top {amount} losers based on {metric}.")
         command = "SELECT name, {metric} FROM {table} ORDER BY {metric} LIMIT {amount}".format(
             metric=metric,
             table=table,
@@ -96,7 +109,9 @@ def extract_from_database(table: str, metric: str, amount: int):
 
 
 def write_to_xml(data: list, file_name: str):
+    """Write data to xml (csv) file."""
     with open('%s.csv' % file_name, 'a') as csv_file:
+        LOG.debug(f"Writing data to {file_name}.csv.")
         writer = csv.writer(csv_file)
         writer.writerow(['Gainers', ' ', 'Losers', ' '])
         writer.writerow(['Company Name', 'Change',
@@ -106,9 +121,7 @@ def write_to_xml(data: list, file_name: str):
                              loser_name, loser_change])
 
 
-def send_mail(send_from: str, send_to: list, subject: str, text: str, files=[],
-              server="127.0.0.1"):
-
+def send_mail(send_from: str, send_to: list, subject: str, text: str, files=[], server="127.0.0.1"):
     msg = MIMEMultipart()
     msg['From'] = send_from
     msg['To'] = COMMASPACE.join(send_to)
@@ -123,7 +136,6 @@ def send_mail(send_from: str, send_to: list, subject: str, text: str, files=[],
                 fil.read(),
                 Name=basename(f)
             )
-        # After the file is closed
         part['Content-Disposition'] = 'attachment; filename="%s"' % basename(f)
         msg.attach(part)
 
@@ -133,8 +145,11 @@ def send_mail(send_from: str, send_to: list, subject: str, text: str, files=[],
 
 
 def make_report(receiver_email, smtp_server="127.0.0.1"):
-    gainers = extract_from_database(table='gainers', metric='change', amount=5)
-    losers = extract_from_database(table='losers', metric='change', amount=5)
+    """Makes csv reports for 5 top gainers/losers and emails it to specified address"""
+    gainers = get_top_choices_from_database(table='gainers', metric='change', amount=5)
+    LOG.debug(f"Top 5 gainers:\n{gainers}")
+    losers = get_top_choices_from_database(table='losers', metric='change', amount=5)
+    LOG.debug(f"Top 5 losers:\n{losers}")
     data = list(map(lambda x, y: (x[0], x[1], y[0], y[1]), gainers, losers))
     write_to_xml(data, 'report')
     mail_text = "Top 5 gainers of the day:\nCompany Change\n{gainers}\n\nTop 5 losers of the day:\nCompany Change\n{losers}".format(
@@ -146,5 +161,6 @@ def make_report(receiver_email, smtp_server="127.0.0.1"):
         "Best Gainers/Losers report",
         mail_text,
         files=["report.csv"],
-        server=server)
+        server=smtp_server)
+    LOG.debug("Removing local csv report")
     os.remove('report.csv')
