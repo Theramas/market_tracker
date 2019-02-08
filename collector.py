@@ -5,7 +5,6 @@ import csv
 import smtplib
 import os
 
-from os.path import basename
 from email.mime.application import MIMEApplication
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
@@ -14,7 +13,8 @@ from email.utils import COMMASPACE, formatdate
 from bs4 import BeautifulSoup
 
 LOG = logging.getLogger('collector')
-LOG_HANDLER = logging.FileHandler('%s/logs/collector.log' % os.getcwd())
+LOG_HANDLER = logging.FileHandler(
+    '%s/logs/collector.log' % os.path.dirname(os.path.realpath(__file__)))
 LOG_FORMATTER = logging.Formatter('%(asctime)s %(levelname)s %(message)s')
 LOG_HANDLER.setFormatter(LOG_FORMATTER)
 LOG.addHandler(LOG_HANDLER)
@@ -51,22 +51,21 @@ def get_data_from_website(url):
     return table_entries
 
 
-def store_in_database(data: dict, table_name: str):
+def store_in_database(data: list, table_name: str):
     """Store collected web data in local database"""
     connection = sqlite3.connect('market.db')
     cursor = connection.cursor()
     LOG.debug(f'Check that table {table_name} exists.')
     cursor.execute(f"SELECT name FROM sqlite_master WHERE type='table' AND name='{table_name}'")
     if not cursor.fetchone():
-        table_values = ', '.join([' '.join(v) for v in sorted(LABEL_ALIASES.values())])
-        cursor.execute(f"CREATE TABLE {table_name} ({table_values})")
-        LOG.debug('Created table %s.' % table_name)
+        table_keys = ', '.join([' '.join(v) for v in sorted(LABEL_ALIASES.values())])
+        cursor.execute(f"CREATE TABLE {table_name} ({table_keys})")
+        LOG.debug('Created table {table_name}.')
     for entry in data:
         command = "INSERT INTO {table_name} ({keys}) VALUES ({values})".format(
             table_name=table_name,
             keys=', '.join(entry.keys()),
-            values=(len(entry)-1) * "?, " + "?"
-        )
+            values=(len(entry)-1) * "?, " + "?")
         cursor.execute(command, list(entry.values()))
     LOG.debug(f'Successfully inserted data into {table_name}:\n{data}')
     connection.commit()
@@ -121,7 +120,7 @@ def write_to_xml(data: list, file_name: str):
                              loser_name, loser_change])
 
 
-def send_mail(send_from: str, send_to: list, subject: str, text: str, files=[], server="127.0.0.1"):
+def send_mail(user: str, password: str, send_from: str, send_to: list, subject: str, text: str, files=[], server="127.0.0.1"):
     msg = MIMEMultipart()
     msg['From'] = send_from
     msg['To'] = COMMASPACE.join(send_to)
@@ -134,17 +133,18 @@ def send_mail(send_from: str, send_to: list, subject: str, text: str, files=[], 
         with open(f, "rb") as fil:
             part = MIMEApplication(
                 fil.read(),
-                Name=basename(f)
+                Name=os.path.basename(f)
             )
-        part['Content-Disposition'] = 'attachment; filename="%s"' % basename(f)
+        part['Content-Disposition'] = 'attachment; filename="%s"' % os.path.basename(f)
         msg.attach(part)
 
     smtp = smtplib.SMTP(server)
+    smtp.login(user, password)
     smtp.sendmail(send_from, send_to, msg.as_string())
     smtp.close()
 
 
-def make_report(receiver_email, smtp_server="127.0.0.1"):
+def make_report(user: str, password: str, receiver_email: str, smtp_server="smtp.sendgrid.net"):
     """Makes csv reports for 5 top gainers/losers and emails it to specified address"""
     gainers = get_top_choices_from_database(table='gainers', metric='change', amount=5)
     LOG.debug(f"Top 5 gainers:\n{gainers}")
@@ -156,11 +156,18 @@ def make_report(receiver_email, smtp_server="127.0.0.1"):
         gainers=[gainer[0] + ' ' + str(gainer[1]) for gainer in gainers],
         losers=[loser[0] + ' ' + str(loser[1]) for loser in losers])
     send_mail(
+        user,
+        password,
         "test@gmail.com",
-        receiver_email,
+        [receiver_email],
         "Best Gainers/Losers report",
         mail_text,
         files=["report.csv"],
         server=smtp_server)
     LOG.debug("Removing local csv report")
     os.remove('report.csv')
+
+
+if __name__ == '__main__':
+    collect_data()
+    make_report('user', 'password', 'nkalmykov13@gmail.com')
